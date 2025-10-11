@@ -1,0 +1,12 @@
+.{
+    .name = .dap_kit,
+    .fingerprint = 0xec54d546c820f13a,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.15.1",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
