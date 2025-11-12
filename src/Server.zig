@@ -25,9 +25,9 @@ const Server = @This();
 /// Allocator
 allocator: std.mem.Allocator,
 /// Server listening for incoming connection
-tcp_server: std.net.Server,
+tcp_server: std.Io.net.Server,
 /// Currently connected client
-client: ?std.net.Server.Connection = null,
+client: ?std.Io.net.Stream = null,
 /// Queues to communicate with debuggee
 transport: *Transport,
 
@@ -35,7 +35,7 @@ transport: *Transport,
 /// Server will block while waiting for the client to connect and then start the debuggee program
 pub fn spawn(
     allocator: std.mem.Allocator,
-    address: std.net.Address,
+    address: std.Io.net.IpAddress,
     transport: *Transport,
 ) std.Thread.SpawnError!std.Thread {
     return try std.Thread.spawn(
@@ -51,7 +51,7 @@ pub fn spawn(
 
 fn start(
     allocator: std.mem.Allocator,
-    address: std.net.Address,
+    address: std.Io.net.IpAddress,
     transport: *Transport,
 ) !void {
     var self = Server{
@@ -76,7 +76,7 @@ fn start(
         self.client = self.tcp_server.accept() catch |err| {
             switch (err) {
                 error.WouldBlock => {
-                    std.Thread.sleep(10_000_000);
+                    sleep(10 * std.time.ns_per_ms);
                     continue;
                 },
                 else => return err,
@@ -86,7 +86,7 @@ fn start(
         std.log.info(
             "Debugger accepted connection from {f}",
             .{
-                self.client.?.address,
+                self.client.?.socket.address,
             },
         );
 
@@ -206,7 +206,7 @@ fn start(
         self.transport.to.push(message.value);
 
         // Don't butcher the CPU
-        std.Thread.sleep(10_000_000);
+        sleep(10 * std.time.ns_per_ms);
     }
 }
 
@@ -356,3 +356,76 @@ pub const BaseProtocolHeader = struct {
         try std.testing.expectError(expected_error, parse(&reader));
     }
 };
+
+/// Old std.Thread.sleep. Because std.Io.Threaded seems like overkill just to sleep on the main thread
+/// Spurious wakeups are possible and no precision of timing is guaranteed.
+pub fn sleep(nanoseconds: u64) void {
+    if (builtin.os.tag == .windows) {
+        const big_ms_from_ns = nanoseconds / std.time.ns_per_ms;
+        const ms = std.lmath.cast(std.os.windows.DWORD, big_ms_from_ns) orelse std.math.maxInt(std.os.windows.DWORD);
+        std.os.windows.kernel32.Sleep(ms);
+        return;
+    }
+
+    if (builtin.os.tag == .wasi) {
+        const w = std.os.wasi;
+        const userdata: w.userdata_t = 0x0123_45678;
+        const clock: w.subscription_clock_t = .{
+            .id = .MONOTONIC,
+            .timeout = nanoseconds,
+            .precision = 0,
+            .flags = 0,
+        };
+        const in: w.subscription_t = .{
+            .userdata = userdata,
+            .u = .{
+                .tag = .CLOCK,
+                .u = .{ .clock = clock },
+            },
+        };
+
+        var event: w.event_t = undefined;
+        var nevents: usize = undefined;
+        _ = w.poll_oneoff(&in, &event, 1, &nevents);
+        return;
+    }
+
+    if (builtin.os.tag == .uefi) {
+        const boot_services = std.os.uefi.system_table.boot_services.?;
+        const us_from_ns = nanoseconds / std.time.ns_per_us;
+        const us = std.math.cast(usize, us_from_ns) orelse std.math.maxInt(usize);
+        boot_services.stall(us) catch unreachable;
+        return;
+    }
+
+    const s = nanoseconds / std.time.ns_per_s;
+    const ns = nanoseconds % std.time.ns_per_s;
+
+    // Newer kernel ports don't have old `nanosleep()` and `clock_nanosleep()` has been around
+    // since Linux 2.6 and glibc 2.1 anyway.
+    if (builtin.os.tag == .linux) {
+        const linux = std.os.linux;
+
+        var req: linux.timespec = .{
+            .sec = std.std.math.cast(linux.time_t, s) orelse std.std.math.maxInt(linux.time_t),
+            .nsec = std.std.math.cast(linux.time_t, ns) orelse std.std.math.maxInt(linux.time_t),
+        };
+        var rem: linux.timespec = undefined;
+
+        while (true) {
+            switch (linux.E.init(linux.clock_nanosleep(.MONOTONIC, .{ .ABSTIME = false }, &req, &rem))) {
+                .SUCCESS => return,
+                .INTR => {
+                    req = rem;
+                    continue;
+                },
+                .FAULT => unreachable,
+                .INVAL => unreachable,
+                .OPNOTSUPP => unreachable,
+                else => return,
+            }
+        }
+    }
+
+    std.posix.nanosleep(s, ns);
+}
