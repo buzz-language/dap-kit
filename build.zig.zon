@@ -2,7 +2,7 @@
     .name = .dap_kit,
     .fingerprint = 0xec54d546c820f13a,
     .version = "0.0.0",
-    .minimum_zig_version = "0.16.0-dev.1301+cbfa87cbe",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{
         "build.zig",

@@ -22,6 +22,8 @@ pub const Transport = struct {
 
 const Server = @This();
 
+/// Io
+io: std.Io,
 /// Allocator
 allocator: std.mem.Allocator,
 /// Server listening for incoming connection
@@ -34,6 +36,7 @@ transport: *Transport,
 /// Start a new Server in its dedicated thread
 /// Server will block while waiting for the client to connect and then start the debuggee program
 pub fn spawn(
+    io: std.Io,
     allocator: std.mem.Allocator,
     address: std.Io.net.IpAddress,
     transport: *Transport,
@@ -42,6 +45,7 @@ pub fn spawn(
         .{},
         start,
         .{
+            io,
             allocator,
             address,
             transport,
@@ -50,16 +54,19 @@ pub fn spawn(
 }
 
 fn start(
+    io: std.Io,
     allocator: std.mem.Allocator,
     address: std.Io.net.IpAddress,
     transport: *Transport,
 ) !void {
     var self = Server{
+        .io = io,
         .allocator = allocator,
         .transport = transport,
         .tcp_server = try address.listen(
+            io,
             .{
-                .force_nonblocking = true,
+                .reuse_address = true,
             },
         ),
     };
@@ -73,10 +80,10 @@ fn start(
 
     // FIXME: add a timeout
     while (true) {
-        self.client = self.tcp_server.accept() catch |err| {
+        self.client = self.tcp_server.accept(io) catch |err| {
             switch (err) {
                 error.WouldBlock => {
-                    sleep(10 * std.time.ns_per_ms);
+                    io.sleep(.fromMilliseconds(10), .awake) catch {};
                     continue;
                 },
                 else => return err,
@@ -121,7 +128,7 @@ fn start(
 
             // Now write it on the client's stream
             var buffer: [1024]u8 = undefined;
-            var stream_writer = self.client.?.stream.writer(buffer[0..]);
+            var stream_writer = self.client.?.writer(io, buffer[0..]);
             var writer = &stream_writer.interface;
 
             try writer.print(
@@ -133,8 +140,6 @@ fn start(
                     response_buffer_writer.written(),
                 },
             );
-
-            try writer.flush();
 
             std.log.debug(
                 "Responding with:\n{s}",
@@ -168,8 +173,8 @@ fn start(
         }
 
         // Is there something on the client stream
-        var client_stream_reader = self.client.?.stream.reader(client_stream_buffer[0..]);
-        const reader = client_stream_reader.interface();
+        var client_stream_reader = self.client.?.reader(io, client_stream_buffer[0..]);
+        const reader = &client_stream_reader.interface;
 
         const raw_message = readJsonMessage(reader, allocator) catch |err| {
             switch (err) {
@@ -206,7 +211,7 @@ fn start(
         self.transport.to.push(message.value);
 
         // Don't butcher the CPU
-        sleep(10 * std.time.ns_per_ms);
+        self.io.sleep(.fromMilliseconds(10), .awake) catch {};
     }
 }
 
@@ -219,9 +224,8 @@ pub fn readJsonMessage(
 }
 
 pub fn deinit(self: *Server) void {
-    if (self.client_poller) |*poller| poller.deinit();
-    if (self.client) |*client| client.stream.close();
-    self.tcp_server.stream.close();
+    if (self.client) |*client| client.close(self.io);
+    self.tcp_server.deinit(self.io);
     self.transport.to.deinit(self.allocator);
     self.transport.from.deinit(self.allocator);
 }
@@ -356,76 +360,3 @@ pub const BaseProtocolHeader = struct {
         try std.testing.expectError(expected_error, parse(&reader));
     }
 };
-
-/// Old std.Thread.sleep. Because std.Io.Threaded seems like overkill just to sleep on the main thread
-/// Spurious wakeups are possible and no precision of timing is guaranteed.
-pub fn sleep(nanoseconds: u64) void {
-    if (builtin.os.tag == .windows) {
-        const big_ms_from_ns = nanoseconds / std.time.ns_per_ms;
-        const ms = std.lmath.cast(std.os.windows.DWORD, big_ms_from_ns) orelse std.math.maxInt(std.os.windows.DWORD);
-        std.os.windows.kernel32.Sleep(ms);
-        return;
-    }
-
-    if (builtin.os.tag == .wasi) {
-        const w = std.os.wasi;
-        const userdata: w.userdata_t = 0x0123_45678;
-        const clock: w.subscription_clock_t = .{
-            .id = .MONOTONIC,
-            .timeout = nanoseconds,
-            .precision = 0,
-            .flags = 0,
-        };
-        const in: w.subscription_t = .{
-            .userdata = userdata,
-            .u = .{
-                .tag = .CLOCK,
-                .u = .{ .clock = clock },
-            },
-        };
-
-        var event: w.event_t = undefined;
-        var nevents: usize = undefined;
-        _ = w.poll_oneoff(&in, &event, 1, &nevents);
-        return;
-    }
-
-    if (builtin.os.tag == .uefi) {
-        const boot_services = std.os.uefi.system_table.boot_services.?;
-        const us_from_ns = nanoseconds / std.time.ns_per_us;
-        const us = std.math.cast(usize, us_from_ns) orelse std.math.maxInt(usize);
-        boot_services.stall(us) catch unreachable;
-        return;
-    }
-
-    const s = nanoseconds / std.time.ns_per_s;
-    const ns = nanoseconds % std.time.ns_per_s;
-
-    // Newer kernel ports don't have old `nanosleep()` and `clock_nanosleep()` has been around
-    // since Linux 2.6 and glibc 2.1 anyway.
-    if (builtin.os.tag == .linux) {
-        const linux = std.os.linux;
-
-        var req: linux.timespec = .{
-            .sec = std.std.math.cast(linux.time_t, s) orelse std.std.math.maxInt(linux.time_t),
-            .nsec = std.std.math.cast(linux.time_t, ns) orelse std.std.math.maxInt(linux.time_t),
-        };
-        var rem: linux.timespec = undefined;
-
-        while (true) {
-            switch (linux.E.init(linux.clock_nanosleep(.MONOTONIC, .{ .ABSTIME = false }, &req, &rem))) {
-                .SUCCESS => return,
-                .INTR => {
-                    req = rem;
-                    continue;
-                },
-                .FAULT => unreachable,
-                .INVAL => unreachable,
-                .OPNOTSUPP => unreachable,
-                else => return,
-            }
-        }
-    }
-
-    std.posix.nanosleep(s, ns);
-}
