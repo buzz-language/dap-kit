@@ -22,6 +22,8 @@ pub const Transport = struct {
 
 const Server = @This();
 
+const log = std.log.scoped(.dap_server);
+
 /// Io
 io: std.Io,
 /// Allocator
@@ -71,7 +73,7 @@ fn start(
         ),
     };
 
-    std.log.info(
+    log.info(
         "Debugger awaiting connection on {f}",
         .{
             address,
@@ -90,7 +92,7 @@ fn start(
             }
         };
 
-        std.log.info(
+        log.info(
             "Debugger accepted connection from {f}",
             .{
                 self.client.?.socket.address,
@@ -101,10 +103,23 @@ fn start(
     }
 
     var client_stream_buffer: [1024]u8 = undefined;
+    var client_stream_reader = self.client.?.reader(io, client_stream_buffer[0..]);
+    var stop_reader = std.atomic.Value(bool).init(false);
+    _ = try std.Thread.spawn(
+        .{},
+        startReader,
+        .{
+            self.io,
+            self.allocator,
+            &client_stream_reader.interface,
+            &self.transport.to,
+            &stop_reader,
+        },
+    );
 
     while (true) {
         // Is there responses to send
-        if (self.transport.from.front()) |response| {
+        while (self.transport.from.front()) |response| {
             // Pop once we're finished using it
             defer self.transport.from.pop();
 
@@ -140,8 +155,9 @@ fn start(
                     response_buffer_writer.written(),
                 },
             );
+            try writer.flush();
 
-            std.log.debug(
+            log.debug(
                 "Responding with:\n{s}",
                 .{
                     response_buffer_writer.written(),
@@ -149,14 +165,14 @@ fn start(
             );
 
             switch (response.type) {
-                .response => std.log.info(
+                .response => log.info(
                     "Responsed to message #{}, success {}",
                     .{
                         response.body.response.request_seq,
                         response.body.response.success,
                     },
                 ),
-                .event => std.log.info(
+                .event => log.info(
                     "Emitted event {s}",
                     .{
                         @tagName(response.body.event.event),
@@ -167,15 +183,24 @@ fn start(
 
             // If successful response to `disconnect` request, stop the server
             if (response.type == .response and response.body.response.command == .disconnect) {
-                std.log.info("Client disconnected, server stopped", .{});
+                stop_reader.store(true, .release);
+                log.info("Client disconnected, server stopped", .{});
                 return;
             }
         }
 
-        // Is there something on the client stream
-        var client_stream_reader = self.client.?.reader(io, client_stream_buffer[0..]);
-        const reader = &client_stream_reader.interface;
+        self.io.sleep(.fromMilliseconds(10), .awake) catch {};
+    }
+}
 
+fn startReader(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    to: *SpscQueue(ProtocolMessage),
+    stop: *std.atomic.Value(bool),
+) !void {
+    while (!stop.load(.acquire)) {
         const raw_message = readJsonMessage(reader, allocator) catch |err| {
             switch (err) {
                 error.ReadFailed => {
@@ -186,7 +211,7 @@ fn start(
             }
         };
 
-        std.log.debug("Received raw message: `{s}`", .{raw_message});
+        log.debug("Received raw message: `{s}`", .{raw_message});
 
         // FIXME: can't free it then, it's in the queue
         // defer allocator.free(raw_message);
@@ -208,10 +233,9 @@ fn start(
             },
         );
 
-        self.transport.to.push(message.value);
+        to.push(message.value);
 
-        // Don't butcher the CPU
-        self.io.sleep(.fromMilliseconds(10), .awake) catch {};
+        io.sleep(.fromMilliseconds(10), .awake) catch {};
     }
 }
 

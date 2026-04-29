@@ -6,6 +6,8 @@ const SpscQueue = @import("spsc_queue.zig").SpscQueue;
 const ProtocolMessage = @import("ProtocolMessage.zig");
 const Server = @import("Server.zig");
 
+const log = std.log.scoped(.dap_adapter);
+
 pub fn Arguments(comptime command: ProtocolMessage.CommandTag) type {
     for (@typeInfo(ProtocolMessage.RequestArguments).@"union".fields) |union_field| {
         if (std.mem.eql(u8, union_field.name, @tagName(command))) {
@@ -53,7 +55,7 @@ pub fn Adapter(comptime Handler: type) type {
                 // Pop once we're done with it
                 self.transport.to.pop();
 
-                std.log.info(
+                log.info(
                     "Received request #{} with command `{s}`",
                     .{
                         request.seq,
@@ -67,7 +69,7 @@ pub fn Adapter(comptime Handler: type) type {
                         const has_callback = @hasField(Handler, command) or @hasDecl(Handler, command);
 
                         if (!has_callback) {
-                            std.log.warn("Missing callback to handle `{s}` requests", .{command});
+                            log.warn("Missing callback to handle `{s}` requests", .{command});
 
                             self.transport.from.push(
                                 .{
