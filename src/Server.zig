@@ -105,7 +105,7 @@ fn start(
     var client_stream_buffer: [1024]u8 = undefined;
     var client_stream_reader = self.client.?.reader(io, client_stream_buffer[0..]);
     var stop_reader = std.atomic.Value(bool).init(false);
-    _ = try std.Thread.spawn(
+    const reader_thread = try std.Thread.spawn(
         .{},
         startReader,
         .{
@@ -184,6 +184,7 @@ fn start(
             // If successful response to `disconnect` request, stop the server
             if (response.type == .response and response.body.response.command == .disconnect) {
                 stop_reader.store(true, .release);
+                reader_thread.join();
                 log.info("Client disconnected, server stopped", .{});
                 return;
             }
