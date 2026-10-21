@@ -9,9 +9,10 @@ const Server = @import("Server.zig");
 const log = std.log.scoped(.dap_adapter);
 
 pub fn Arguments(comptime command: ProtocolMessage.CommandTag) type {
-    for (@typeInfo(ProtocolMessage.RequestArguments).@"union".fields) |union_field| {
-        if (std.mem.eql(u8, union_field.name, @tagName(command))) {
-            return union_field.type;
+    const info = @typeInfo(ProtocolMessage.RequestArguments).@"union";
+    for (info.field_names, info.field_types) |field_name, field_type| {
+        if (std.mem.eql(u8, field_name, @tagName(command))) {
+            return field_type;
         }
     }
 
@@ -19,9 +20,10 @@ pub fn Arguments(comptime command: ProtocolMessage.CommandTag) type {
 }
 
 pub fn Response(comptime command: ProtocolMessage.CommandTag) type {
-    for (@typeInfo(ProtocolMessage.ResponseBody).@"union".fields) |union_field| {
-        if (std.mem.eql(u8, union_field.name, @tagName(command))) {
-            return union_field.type;
+    const info = @typeInfo(ProtocolMessage.ResponseBody).@"union";
+    for (info.field_names, info.field_types) |field_name, field_type| {
+        if (std.mem.eql(u8, field_name, @tagName(command))) {
+            return field_type;
         }
     }
 

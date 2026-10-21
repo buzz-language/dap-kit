@@ -132,7 +132,7 @@ fn start(
             try std.json.Stringify.value(
                 response,
                 .{
-                    .whitespace = if (builtin.mode == .Debug)
+                    .whitespace = if (builtin.mode == .debug)
                         .indent_2
                     else
                         .minified,

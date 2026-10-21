@@ -59,9 +59,16 @@ pub fn jsonStringify(
         inline else => |body| {
             const body_type = @TypeOf(body);
 
-            inline for (std.meta.fields(body_type)) |field| {
-                try out_stream.objectField(field.name);
-                try out_stream.write(@field(body, field.name));
+            switch (@typeInfo(body_type)) {
+                .@"struct" => |info| inline for (info.field_names) |field_name| {
+                    try out_stream.objectField(field_name);
+                    try out_stream.write(@field(body, field_name));
+                },
+                .@"union" => |info| inline for (info.field_names) |field_name| {
+                    try out_stream.objectField(field_name);
+                    try out_stream.write(@field(body, field_name));
+                },
+                else => unreachable,
             }
         },
     }
@@ -92,13 +99,14 @@ pub const Body = union(MessageTag) {
         const tag_name = source.object.get("type") orelse return error.MissingField;
         if (tag_name != .string) return error.UnexpectedToken;
 
-        inline for (std.meta.fields(@This())) |field| {
-            if (std.mem.eql(u8, tag_name.string, field.name)) {
+        const info = @typeInfo(@This()).@"union";
+        inline for (info.field_names, info.field_types) |field_name, field_type| {
+            if (std.mem.eql(u8, tag_name.string, field_name)) {
                 return @unionInit(
                     @This(),
-                    field.name,
+                    field_name,
                     try std.json.parseFromValueLeaky(
-                        field.type,
+                        field_type,
                         allocator,
                         source,
                         options,
@@ -409,20 +417,18 @@ pub const RequestArguments = union(CommandTag) {
         const tag_name = source.object.get("command") orelse return error.MissingField;
         if (tag_name != .string) return error.UnexpectedToken;
 
-        inline for (std.meta.fields(@This())) |field| {
-            if (std.mem.eql(u8, tag_name.string, field.name)) {
+        const info = @typeInfo(@This()).@"union";
+        inline for (info.field_names, info.field_types) |field_name, field_type| {
+            if (std.mem.eql(u8, tag_name.string, field_name)) {
                 return @unionInit(
                     @This(),
-                    field.name,
-                    if (field.type == void)
-                        void{}
-                    else
-                        try std.json.parseFromValueLeaky(
-                            field.type,
-                            allocator,
-                            source.object.get("arguments") orelse return error.MissingField,
-                            options,
-                        ),
+                    field_name,
+                    if (field_type == void) {} else try std.json.parseFromValueLeaky(
+                        field_type,
+                        allocator,
+                        source.object.get("arguments") orelse return error.MissingField,
+                        options,
+                    ),
                 );
             }
         }
@@ -1360,20 +1366,18 @@ pub const EventBody = union(EventTag) {
         const tag_name = source.object.get("event") orelse return error.MissingField;
         if (tag_name != .string) return error.UnexpectedToken;
 
-        inline for (std.meta.fields(@This())) |field| {
-            if (std.mem.eql(u8, tag_name.string, field.name)) {
+        const info = @typeInfo(@This()).@"union";
+        inline for (info.field_names, info.field_types) |field_name, field_type| {
+            if (std.mem.eql(u8, tag_name.string, field_name)) {
                 return @unionInit(
                     @This(),
-                    field.name,
-                    if (field.type == void)
-                        void{}
-                    else
-                        try std.json.parseFromValueLeaky(
-                            field.type,
-                            allocator,
-                            source.object.get("body") orelse return error.MissingField,
-                            options,
-                        ),
+                    field_name,
+                    if (field_type == void) {} else try std.json.parseFromValueLeaky(
+                        field_type,
+                        allocator,
+                        source.object.get("body") orelse return error.MissingField,
+                        options,
+                    ),
                 );
             }
         }
@@ -2489,10 +2493,10 @@ test "From json" {
         "{ \"seq\": 25, \"type\": \"event\", \"event\": \"terminated\", \"body\": { \"restart\": false } }",
     };
 
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = debug_allocator.deinit();
+    var safe_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer _ = safe_allocator.deinit();
 
-    const gpa = debug_allocator.allocator();
+    const gpa = safe_allocator.allocator();
 
     for (data) |sample| {
         const parsed_message_value = try std.json.parseFromSlice(
